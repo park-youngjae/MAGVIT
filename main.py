@@ -133,6 +133,8 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
             # Total Generator Loss: Combine losses with respective weights
             total_generator_loss = lambda_perceptual * perceptual_loss_value + lambda_gan * gan_loss_value
 
+            total_loss_generator += total_generator_loss.item()  
+
             # Backpropagation
             total_generator_loss.backward()
             optimizer_vqvae.step()
@@ -158,6 +160,8 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
             # Total Discriminator Loss
             total_discriminator_loss = (real_loss + fake_loss) / 2
 
+            total_loss_discriminator += total_discriminator_loss.item()
+
             # Backpropagation for Discriminator
             total_discriminator_loss.backward()
             optimizer_discriminator.step()
@@ -172,7 +176,7 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
             writer.add_scalar('Loss/Generator_GAN', gan_loss_value.item(), epoch * len(train_loader) + i)
 
             # Print and log losses for each batch
-            print(f"Epoch {epoch+1}, Batch {i+1}/{len(train_loader)}, Generator Loss: {total_generator_loss.item()}, Discriminator Loss: {total_discriminator_loss.item()}")
+            # print(f"Epoch {epoch+1}, Batch {i+1}/{len(train_loader)}, Generator Loss: {total_generator_loss.item()}, Discriminator Loss: {total_discriminator_loss.item()}")
             logging.info(f"Epoch {epoch+1}, Batch {i+1}/{len(train_loader)}, Generator Loss: {total_generator_loss.item()}, Discriminator Loss: {total_discriminator_loss.item()}")
 
 
