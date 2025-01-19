@@ -169,10 +169,10 @@ def train(rank,world_size):
             ema.update()
 
             # Log losses to TensorBoard
-            writer.add_scalar('Loss/Generator', total_generator_loss.item(), epoch * len(train_loader) + i)
-            writer.add_scalar('Loss/Discriminator', total_discriminator_loss.item(), epoch * len(train_loader) + i)
-            writer.add_scalar('Loss/Perceptual', perceptual_loss_value.item(), epoch * len(train_loader) + i)
-            writer.add_scalar('Loss/GAN', gan_loss_value.item(), epoch * len(train_loader) + i)
+            writer.add_scalar('Loss/Generator_Total', total_generator_loss.item(), epoch * len(train_loader) + i)
+            writer.add_scalar('Loss/Discriminator_Total', total_discriminator_loss.item(), epoch * len(train_loader) + i)
+            writer.add_scalar('Loss/Generator_Perceptual', perceptual_loss_value.item(), epoch * len(train_loader) + i)
+            writer.add_scalar('Loss/Generator_GAN', gan_loss_value.item(), epoch * len(train_loader) + i)
 
             # Print and log losses for each batch
             print(f"Epoch {epoch+1}, Batch {i+1}/{len(train_loader)}, Generator Loss: {total_generator_loss.item()}, Discriminator Loss: {total_discriminator_loss.item()}")
