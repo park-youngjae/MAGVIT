@@ -32,14 +32,14 @@ warnings.filterwarnings('ignore')
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '65535'
-    os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3,4,5,6,7'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
     dist.destroy_process_group()
 
 
-def train(rank,world_size):
+def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
     setup(rank, world_size)
     # Generate a common base name with timestamp
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -49,35 +49,32 @@ def train(rank,world_size):
     writer = SummaryWriter(log_dir=f'./logs/{common_filename}')
     logging.basicConfig(filename=f'./logs/{common_filename}.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
     device = torch.device("cuda", rank)  
 
     # Dataset Preparation
-    # transform = transforms.Compose([
-    #     transforms.Resize((128, 128)),
-    #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    # ])
+    if dataset_name=='k600':
+        transform = transforms.Compose([ # for Kinetics-600 Train Set
+            Lambda(lambda x: x / 255.0),  # Normalize to [0, 1]
+            transforms.Resize((128, 128)),           # Resize to a fixed size
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Standard normalization
+        ])
 
-    transform = transforms.Compose([ # for Kinetics-600 Train Set
-        Lambda(lambda x: x / 255.0),  # Normalize to [0, 1]
-        transforms.Resize((128, 128)),           # Resize to a fixed size
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Standard normalization
-    ])
 
-    # transform = transforms.Compose([ # for Moving MNIST Dataset
-    #     # transforms.ToPILImage(),  
-    #     transforms.ToTensor(),
-    #     transforms.Resize((128, 128)),  
-    #     transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  
-    #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    # ])
+        train_dataset = KineticsDataset('../k600/train', transform=transform)  # Custom Dataset
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+        train_loader = DataLoader(train_dataset, batch_size=batchsize, shuffle=False, sampler=train_sampler)
 
-    train_dataset = KineticsDataset('../k600/train', transform=transform)  # Custom Dataset
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-    train_loader = DataLoader(train_dataset, batch_size=8, shuffle=False, sampler=train_sampler)
-    # train_dataset = MovingMNIST('./data', transform=transform)
-    # train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-    # train_loader = DataLoader(train_dataset, batch_size=8, shuffle=False, sampler=train_sampler)
+    elif dataset_name=='MMNIST':
+        transform = transforms.Compose([ # for Moving MNIST Dataset
+            transforms.ToTensor(),
+            transforms.Resize((128, 128)),  
+            transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+        train_dataset = MovingMNIST('../Data/mmnist', transform=transform)
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+        train_loader = DataLoader(train_dataset, batch_size=batchsize, shuffle=False, sampler=train_sampler)
 
     # Define models
     model_vqvae = VQVAE().to(device)
@@ -194,9 +191,9 @@ def train(rank,world_size):
             'state_dict_Discriminator': model_discriminator.state_dict(),
             'optimizer_vqvae': optimizer_vqvae.state_dict(),
             'optimizer_discriminator': optimizer_discriminator.state_dict(),
-        }, filename=f"./checkpoints/checkpoint_{common_filename}_epoch_{epoch+1}.pth.tar")
+        }, filename=f"./checkpoints/checkpoint_{dataset_name}_{common_filename}_epoch_{epoch+1}.pth.tar")
 
 
 if __name__ == "__main__":
-    world_size = 1
-    torch.multiprocessing.spawn(train, args=(world_size,), nprocs=world_size, join=True)
+    world_size = 8
+    torch.multiprocessing.spawn(train_vqvae, args=(world_size,), nprocs=world_size, join=True)
