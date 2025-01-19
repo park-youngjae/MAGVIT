@@ -122,7 +122,7 @@ def train(rank,world_size):
 
             # Train Generator
             optimizer_vqvae.zero_grad()  
-            reconstructed_videos = model_vqvae(videos)
+            z, z_q, reconstructed_videos = model_vqvae(videos)
             reconstructed_videos = reconstructed_videos.permute(0, 2, 1, 3, 4)  # [B, T, C, H, W]
 
             # Perceptual Loss: Calculate loss between features of real and reconstructed videos
