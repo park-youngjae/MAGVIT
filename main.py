@@ -138,8 +138,8 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
             optimizer_vqvae.step()
 
             if i == 0:
-                score_fvd = calculate_fvd(videos,reconstructed_videos,device=device)
-                print(f"FVD: {score_fvd} at Epoch {epoch+1}")
+                # score_fvd = calculate_fvd(videos,reconstructed_videos,device=device)
+                # print(f"FVD: {score_fvd} at Epoch {epoch+1}")
                 first_video_reconstructed = reconstructed_videos[0, 0] 
                 first_video_reconstructed = first_video_reconstructed.unsqueeze(0) # [1, C, H, W]
                 writer.add_images('Reconstructed_Videos', first_video_reconstructed, epoch * len(train_loader) + i)
