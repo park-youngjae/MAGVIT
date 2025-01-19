@@ -1,5 +1,6 @@
 import os
 import pdb
+import pytz
 import random
 import logging
 import datetime
@@ -18,8 +19,8 @@ from tqdm import tqdm
 from dataload import MovingMNIST, KineticsDataset
 from model import VQVAE, Discriminator
 from torch.utils.tensorboard import SummaryWriter
-from loss import PerceptualLoss, gan_loss, compute_gradient_penalty
-from utils import save_checkpoint, EMA
+from loss import PerceptualLoss, gan_loss, compute_gradient_penalty, lecam_regularization
+from utils import save_checkpoint, combined_scheduler, EMA
 from eval import calculate_fvd
 
 import torch.distributed as dist
@@ -39,17 +40,21 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
+def train_vqvae(rank,world_size,dataset_name='k600',batchsize=4):
     setup(rank, world_size)
     # Generate a common base name with timestamp
-    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    common_filename = f"training_{timestamp}"
+    timezone = pytz.timezone('Etc/GMT+9')
+    timestamp = datetime.datetime.now(timezone).strftime("%Y%m%d-%H%M%S")
+    common_filename = f"training_{timestamp}_{dataset_name}"
 
     # Setup TensorBoard and logging with the common filename
     writer = SummaryWriter(log_dir=f'./logs/{common_filename}')
     logging.basicConfig(filename=f'./logs/{common_filename}.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     device = torch.device("cuda", rank)  
+
+    # Settings
+    num_epochs_stage1 = 45
 
     # Dataset Preparation
     if dataset_name=='k600':
@@ -60,7 +65,7 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
         ])
 
 
-        train_dataset = KineticsDataset('../k600/train', transform=transform)  # Custom Dataset
+        train_dataset = KineticsDataset('../Data/k600/train', transform=transform)  # Custom Dataset
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
         train_loader = DataLoader(train_dataset, batch_size=batchsize, shuffle=False, sampler=train_sampler)
 
@@ -88,7 +93,10 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
     optimizer_discriminator = optim.Adam(model_discriminator.parameters(), lr=1e-4, betas=(0, 0.99))
 
     # Learning rate scheduler
-    scheduler_vqvae = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_vqvae, T_max=len(train_loader))
+    scheduler_vqvae = torch.optim.lr_scheduler.LambdaLR(
+        optimizer_vqvae,
+        lr_lambda=lambda epoch: combined_scheduler(epoch, warmup_epochs=5, total_epochs=num_epochs_stage1, initial_lr=1e-4)
+    )
     scheduler_discriminator = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_discriminator, T_max=len(train_loader))
 
     # Loss functions
@@ -101,8 +109,7 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
     lambda_lecam = 0.01  # LeCam Regularization weight
     gradient_penalty_cost = 10  # Discriminator gradient penalty
 
-    # Settings
-    num_epochs_stage1 = 45
+
 
     # Training loop
     for epoch in range(num_epochs_stage1):
@@ -132,7 +139,6 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
 
             # Total Generator Loss: Combine losses with respective weights
             total_generator_loss = lambda_perceptual * perceptual_loss_value + lambda_gan * gan_loss_value
-
             total_loss_generator += total_generator_loss.item()  
 
             # Backpropagation
@@ -156,6 +162,10 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
             fake_labels = torch.zeros_like(fake_logits)
             real_loss = gan_loss(real_logits, real_labels)
             fake_loss = gan_loss(fake_logits, fake_labels)
+
+            # Calculate LeCam Regularization
+            lecam_reg = lecam_regularization(model_discriminator, videos, reconstructed_videos.detach())
+            lecam_weight = 0.01  # Define the regularization weight
 
             # Total Discriminator Loss
             total_discriminator_loss = (real_loss + fake_loss) / 2
@@ -186,7 +196,11 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
 
         # Print and log average losses for the epoch
         print(f"Epoch {epoch+1}: Average Generator Loss: {avg_loss_generator}, Average Discriminator Loss: {avg_loss_discriminator}")
-        logging.info(f"Epoch {epoch+1}: Average Generator Loss: {avg_loss_generator}, Average Discriminator Loss: {avg_loss_discriminator}")
+        logging.info(f"Epoch {epoch+1}: Average Generator Loss: {avg_loss_generator}, Average Discriminator Loss: {avg_loss_discriminator}\n")
+
+        # Log average losses to TensorBoard
+        writer.add_scalar('Loss_AVG/Generator', avg_loss_generator, epoch)
+        writer.add_scalar('Loss_AVG/Discriminator', avg_loss_discriminator, epoch)
 
         # Save checkpoint at the end of each epoch
         save_checkpoint({
@@ -195,7 +209,7 @@ def train_vqvae(rank,world_size,dataset_name='MMNIST',batchsize=4):
             'state_dict_Discriminator': model_discriminator.state_dict(),
             'optimizer_vqvae': optimizer_vqvae.state_dict(),
             'optimizer_discriminator': optimizer_discriminator.state_dict(),
-        }, filename=f"./checkpoints/checkpoint_{dataset_name}_{common_filename}_epoch_{epoch+1}.pth.tar")
+        }, filename=f"./checkpoints/checkpoint_{dataset_name}_{timestamp}_epoch_{epoch+1}.pth.tar")
 
 
 if __name__ == "__main__":
