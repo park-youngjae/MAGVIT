@@ -164,7 +164,7 @@ class VQVAE(nn.Module):
         encoded = self.encoder(x)
         quantized = self.quantizer(encoded)
         decoded = self.decoder(quantized)
-        return decoded
+        return encoder, quantizer, decoded
 
 class ResBlockDown(nn.Module):
     def __init__(self, in_channels, out_channels):
