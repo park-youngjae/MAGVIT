@@ -6,6 +6,10 @@ from scipy.linalg import sqrtm
 import torch
 import torch.nn as nn
 
+def collate_fn_ignore_none(batch):
+    # Remove None items from the batch
+    batch = [item for item in batch if item is not None]
+    return batch
 
 def save_checkpoint(state, filename="checkpoint.pth.tar"):
     torch.save(state, filename)

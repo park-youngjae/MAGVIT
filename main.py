@@ -20,7 +20,7 @@ from dataload import MovingMNIST, KineticsDataset
 from model import VQVAE, Discriminator
 from torch.utils.tensorboard import SummaryWriter
 from loss import PerceptualLoss, gan_loss, compute_gradient_penalty, lecam_regularization
-from utils import save_checkpoint, combined_scheduler, EMA
+from utils import collate_fn_ignore_none, save_checkpoint, combined_scheduler, EMA
 from eval import calculate_fvd
 
 import torch.distributed as dist
@@ -32,7 +32,7 @@ warnings.filterwarnings('ignore')
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '65535'
+    os.environ['MASTER_PORT'] = '29500'
     os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3,4,5,6,7'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
@@ -67,7 +67,8 @@ def train_vqvae(rank,world_size,dataset_name='k600',batchsize=4):
 
         train_dataset = KineticsDataset('../Data/k600/train', transform=transform)  # Custom Dataset
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-        train_loader = DataLoader(train_dataset, batch_size=batchsize, shuffle=False, sampler=train_sampler)
+        train_loader = DataLoader(train_dataset, batch_size=batchsize, shuffle=False, sampler=train_sampler, num_workers=4, pin_memory=True)
+        # train_loader = DataLoader(train_dataset, batch_size=batchsize, collate_fn=collate_fn_ignore_none, shuffle=False, sampler=train_sampler)
 
     elif dataset_name=='MMNIST':
         transform = transforms.Compose([ # for Moving MNIST Dataset
@@ -188,7 +189,6 @@ def train_vqvae(rank,world_size,dataset_name='k600',batchsize=4):
             # Print and log losses for each batch
             # print(f"Epoch {epoch+1}, Batch {i+1}/{len(train_loader)}, Generator Loss: {total_generator_loss.item()}, Discriminator Loss: {total_discriminator_loss.item()}")
             logging.info(f"Epoch {epoch+1}, Batch {i+1}/{len(train_loader)}, Generator Loss: {total_generator_loss.item()}, Discriminator Loss: {total_discriminator_loss.item()}")
-
 
         # Average the losses
         avg_loss_discriminator = total_loss_discriminator / len(train_loader)

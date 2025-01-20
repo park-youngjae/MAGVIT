@@ -19,6 +19,41 @@ from torch.utils.data import Dataset
 
 
 # Load 16 frames from each video
+# class KineticsDataset(Dataset):
+#     def __init__(self, directory, transform=None):
+#         super(KineticsDataset, self).__init__()
+#         self.directory = directory
+#         self.transform = transform
+#         self.videos = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(('.mp4', '.avi'))]
+
+#     def __len__(self):
+#         return len(self.videos)
+
+#     def __getitem__(self, idx):
+#         video_path = self.videos[idx]
+#         # Read video and audio, torchvision reads videos as (T, H, W, C)
+#         video, _, _ = io.read_video(video_path, pts_unit='sec')
+        
+#         total_frames = video.shape[0]
+#         target_frames = 16  # We want exactly 16 frames
+        
+#         # Handling videos shorter than 16 frames
+#         if total_frames < target_frames:
+#             repeat, remainder = divmod(target_frames, total_frames)
+#             video = video.repeat(repeat, 1, 1, 1)
+#             video = torch.cat((video, video[:remainder]), dim=0)
+#         elif total_frames > target_frames:
+#             # If the video is longer, select 16 frames evenly spaced from the video
+#             indices = torch.linspace(0, total_frames - 1, target_frames).long()
+#             video = video[indices]
+        
+#         video = video.permute(0, 3, 1, 2)  # Change shape to (T, C, H, W)
+
+#         if self.transform:
+#             video = self.transform(video)
+        
+#         return video
+
 class KineticsDataset(Dataset):
     def __init__(self, directory, transform=None):
         super(KineticsDataset, self).__init__()
@@ -36,14 +71,14 @@ class KineticsDataset(Dataset):
         
         total_frames = video.shape[0]
         target_frames = 16  # We want exactly 16 frames
-        
-        # Handling videos shorter than 16 frames
+
+        # Skip videos with fewer frames than the target
         if total_frames < target_frames:
-            repeat, remainder = divmod(target_frames, total_frames)
-            video = video.repeat(repeat, 1, 1, 1)
-            video = torch.cat((video, video[:remainder]), dim=0)
-        elif total_frames > target_frames:
-            # If the video is longer, select 16 frames evenly spaced from the video
+            return None  # Or raise ValueError if skipping is not desired
+
+        # Handling videos longer than or equal to 16 frames
+        if total_frames > target_frames:
+            # Select 16 frames evenly spaced from the video
             indices = torch.linspace(0, total_frames - 1, target_frames).long()
             video = video[indices]
         
@@ -53,6 +88,7 @@ class KineticsDataset(Dataset):
             video = self.transform(video)
         
         return video
+
 
 # Load every 16 frames from every video
 # class KineticsDataset(Dataset):
