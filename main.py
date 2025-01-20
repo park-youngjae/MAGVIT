@@ -1,6 +1,7 @@
 import os
 import pdb
 import pytz
+import lpips
 import random
 import logging
 import datetime
@@ -17,10 +18,12 @@ from tqdm import tqdm
 
 # Import custom modules
 from dataload import MovingMNIST, KineticsDataset
-from model import VQVAE, Discriminator
+# from model import VQVAE, Discriminator
+from model import VQModel as VQVAE
+from model import Discriminator
 from torch.utils.tensorboard import SummaryWriter
-from loss import PerceptualLoss, gan_loss, compute_gradient_penalty, lecam_regularization
-from utils import collate_fn_ignore_none, save_checkpoint, combined_scheduler, EMA
+from loss import gan_loss, compute_gradient_penalty, lecam_regularization, log_laplace_loss, calculate_video_lpips
+from utils import lr_lambda, collate_fn_ignore_none, save_checkpoint, combined_scheduler, EMA
 from eval import calculate_fvd
 
 import torch.distributed as dist
@@ -32,15 +35,16 @@ warnings.filterwarnings('ignore')
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ['MASTER_PORT'] = '29501'
     os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3,4,5,6,7'
+    # os.environ['CUDA_VISIBLE_DEVICES'] = '7'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 def cleanup():
     dist.destroy_process_group()
 
 
-def train_vqvae(rank,world_size,dataset_name='k600',batchsize=4):
+def train_vqvae(rank,world_size,dataset_name='k600',batchsize=2):
     setup(rank, world_size)
     # Generate a common base name with timestamp
     timezone = pytz.timezone('Etc/GMT+9')
@@ -66,8 +70,10 @@ def train_vqvae(rank,world_size,dataset_name='k600',batchsize=4):
 
 
         train_dataset = KineticsDataset('../Data/k600/train', transform=transform)  # Custom Dataset
+        # train_loader = DataLoader(train_dataset, batch_size=batchsize, shuffle=False, num_workers=0, pin_memory=True)
+
         train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-        train_loader = DataLoader(train_dataset, batch_size=batchsize, shuffle=False, sampler=train_sampler, num_workers=4, pin_memory=True)
+        train_loader = DataLoader(train_dataset, batch_size=batchsize, shuffle=False, sampler=train_sampler, num_workers=0, pin_memory=True)
         # train_loader = DataLoader(train_dataset, batch_size=batchsize, collate_fn=collate_fn_ignore_none, shuffle=False, sampler=train_sampler)
 
     elif dataset_name=='MMNIST':
@@ -98,13 +104,17 @@ def train_vqvae(rank,world_size,dataset_name='k600',batchsize=4):
         optimizer_vqvae,
         lr_lambda=lambda epoch: combined_scheduler(epoch, warmup_epochs=5, total_epochs=num_epochs_stage1, initial_lr=1e-4)
     )
+    # scheduler_vqvae = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_vqvae, T_max=len(train_loader))
     scheduler_discriminator = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_discriminator, T_max=len(train_loader))
 
     # Loss functions
-    vgg_feature_extractor = torch.hub.load('pytorch/vision:v0.6.0', 'vgg19', pretrained=True).features.to(device).eval()
-    perceptual_loss = PerceptualLoss(vgg_feature_extractor)
+    # vgg_feature_extractor = torch.hub.load('pytorch/vision:v0.6.0', 'vgg19', pretrained=True).features.to(device).eval()
+    # perceptual_loss = PerceptualLoss(vgg_feature_extractor)
+    # perceptual_loss = lpips.LPIPS(net='vgg').to(device)
     gan_loss = nn.BCEWithLogitsLoss()  # GAN loss
-    criterion = nn.MSELoss()  # Reconstruction loss
+    reconstruction_loss = nn.MSELoss()  # Reconstruction loss
+    lpips_model = lpips.LPIPS(net='vgg').to(device)
+
     lambda_perceptual = 0.1  # Perceptual loss weight
     lambda_gan = 0.1  # Generator adversarial loss weight
     lambda_lecam = 0.01  # LeCam Regularization weight
@@ -127,19 +137,27 @@ def train_vqvae(rank,world_size,dataset_name='k600',batchsize=4):
 
             # Train Generator
             optimizer_vqvae.zero_grad()  
-            z, z_q, reconstructed_videos = model_vqvae(videos)
+            reconstructed_videos, quant_loss  = model_vqvae(videos)
             reconstructed_videos = reconstructed_videos.permute(0, 2, 1, 3, 4)  # [B, T, C, H, W]
 
             # Perceptual Loss: Calculate loss between features of real and reconstructed videos
-            perceptual_loss_value = perceptual_loss(reconstructed_videos, videos)
+            perceptual_loss_value = calculate_video_lpips(reconstructed_videos, videos, lpips_model)
 
             # Generator's Adversarial Loss: Discriminator should classify the reconstructed videos as real
             fake_logits = model_discriminator(reconstructed_videos)
             target_real_labels = torch.ones_like(fake_logits)
             gan_loss_value = gan_loss(fake_logits, target_real_labels)
 
+            # Log Laplace Loss: Measure distribution alignment
+            mu = reconstructed_videos  # Assuming model predicts mu
+            log_sigma = torch.zeros_like(reconstructed_videos)  # Assuming constant sigma for simplicity
+            log_laplace_loss_value, neg_log_likelihood = log_laplace_loss(videos, mu, log_sigma)
+
             # Total Generator Loss: Combine losses with respective weights
-            total_generator_loss = lambda_perceptual * perceptual_loss_value + lambda_gan * gan_loss_value
+            # reconstruction_loss + g_adversarial_loss + perceptual_loss + quantizer_loss + logit_laplace_loss
+            reconstruction_loss_value = reconstruction_loss(videos, reconstructed_videos)                                   # Calculate reconstruction loss (l2)
+
+            total_generator_loss = reconstruction_loss_value + lambda_gan * gan_loss_value + log_laplace_loss_value.mean()+ lambda_perceptual * perceptual_loss_value 
             total_loss_generator += total_generator_loss.item()  
 
             # Backpropagation
@@ -171,7 +189,12 @@ def train_vqvae(rank,world_size,dataset_name='k600',batchsize=4):
             # Total Discriminator Loss
             total_discriminator_loss = (real_loss + fake_loss) / 2
 
-            total_loss_discriminator += total_discriminator_loss.item()
+            # d_adversarial_loss + grad_penalty + lecam_loss
+            lecam_loss_value = lecam_regularization(model_discriminator, videos, reconstructed_videos.detach())             # Calculate lecam regularization
+            grad_penalty_value = compute_gradient_penalty(                                                                  # Calculate gradient penalty
+                model_discriminator, real_data=videos, fake_data=reconstructed_videos.detach(), device=device
+            )
+            total_loss_discriminator +=  total_discriminator_loss.item() + grad_penalty_value.item() +lecam_loss_value.item()
 
             # Backpropagation for Discriminator
             total_discriminator_loss.backward()
@@ -189,6 +212,7 @@ def train_vqvae(rank,world_size,dataset_name='k600',batchsize=4):
             # Print and log losses for each batch
             # print(f"Epoch {epoch+1}, Batch {i+1}/{len(train_loader)}, Generator Loss: {total_generator_loss.item()}, Discriminator Loss: {total_discriminator_loss.item()}")
             logging.info(f"Epoch {epoch+1}, Batch {i+1}/{len(train_loader)}, Generator Loss: {total_generator_loss.item()}, Discriminator Loss: {total_discriminator_loss.item()}")
+            torch.cuda.empty_cache()
 
         # Average the losses
         avg_loss_discriminator = total_loss_discriminator / len(train_loader)

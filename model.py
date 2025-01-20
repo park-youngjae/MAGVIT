@@ -2,6 +2,9 @@ import pdb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pytorch_lightning as pl
+from einops import rearrange
+import argparse, os, sys, datetime, glob, importlib
 
 class ResBlockX(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -143,6 +146,7 @@ class VectorQuantizer(nn.Module):
         self.embedding.weight.data.uniform_(-1.0 / num_embeddings, 1.0 / num_embeddings)
 
     def forward(self, x):
+        print("vq-z",x.shape)
         flat_x = x.permute(0, 2, 3, 4, 1).reshape(-1, x.shape[1])
         distances = (torch.sum(flat_x**2, dim=1, keepdim=True) 
                     + torch.sum(self.embedding.weight**2, dim=1)
@@ -152,6 +156,74 @@ class VectorQuantizer(nn.Module):
         encodings.scatter_(1, encoding_indices, 1)
         quantized = torch.matmul(encodings, self.embedding.weight).view(x.shape)
         return quantized
+
+class VectorQuantizer2(nn.Module):
+    """
+    Improved version over VectorQuantizer, can be used as a drop-in replacement. Mostly
+    avoids costly matrix multiplications and allows for post-hoc remapping of indices.
+    """
+    def __init__(self, n_e=1024, e_dim=256, beta=0.25, remap=None, unknown_index="random",
+                 sane_index_shape=False, legacy=False):
+        super().__init__()
+        self.n_e = n_e
+        self.e_dim = e_dim
+        self.beta = beta
+        self.legacy = legacy
+
+        self.embedding = nn.Embedding(self.n_e, self.e_dim)
+        self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
+
+        self.remap = remap
+        if self.remap is not None:
+            self.register_buffer("used", torch.tensor(np.load(self.remap)))
+            self.re_embed = self.used.shape[0]
+            self.unknown_index = unknown_index  # "random", "extra", or integer
+            if self.unknown_index == "extra":
+                self.unknown_index = self.re_embed
+                self.re_embed += 1
+            print(f"Remapping {self.n_e} indices to {self.re_embed} indices. "
+                  f"Using {self.unknown_index} for unknown indices.")
+        else:
+            self.re_embed = n_e
+
+        self.sane_index_shape = sane_index_shape
+
+    def forward(self, z, temp=None, rescale_logits=False, return_logits=False):
+        # reshape z -> (batch, time, height, width, channel) and flatten
+        z = rearrange(z, 'b t c h w -> b t h w c').contiguous()
+        z_flattened = z.view(-1, self.e_dim)  # flatten to (b*t*h*w, e_dim)
+        
+        # Calculate distances between z and embeddings
+        d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
+            torch.sum(self.embedding.weight**2, dim=1) - 2 * \
+            torch.einsum('bd,dn->bn', z_flattened, self.embedding.weight.t())
+
+        min_encoding_indices = torch.argmin(d, dim=1)
+        z_q = self.embedding(min_encoding_indices).view(z.shape)
+        perplexity = None
+        min_encodings = None
+
+        if not self.legacy:
+            loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + \
+                   torch.mean((z_q - z.detach()) ** 2)
+        else:
+            loss = torch.mean((z_q.detach() - z) ** 2) + self.beta * \
+                   torch.mean((z_q - z.detach()) ** 2)
+
+        # Preserve gradients
+        z_q = z + (z_q - z).detach()
+
+        # reshape back to match original input shape
+        z_q = rearrange(z_q, 'b t h w c -> b t c h w').contiguous()
+
+        if self.remap is not None:
+            min_encoding_indices = self.remap_to_used(min_encoding_indices.view(z.shape[0], -1))
+            min_encoding_indices = min_encoding_indices.view(-1, 1)  # flatten
+
+        if self.sane_index_shape:
+            min_encoding_indices = min_encoding_indices.view(z_q.shape[0], z_q.shape[1], z_q.shape[3], z_q.shape[4])
+
+        return z_q, loss, (perplexity, min_encodings, min_encoding_indices)
 
 class VQVAE(nn.Module):
     def __init__(self):
@@ -231,6 +303,26 @@ class Discriminator(nn.Module):
 
         return x
 
+
+class VQModel(pl.LightningModule):
+    def __init__(self,
+                 n_embed=1024,
+                 embed_dim=256,
+                 remap=None,
+                 sane_index_shape=False,  # tell vector quantizer to return indices as bhw
+                 ):
+        super().__init__()
+        self.encoder = Encoder()
+        self.decoder = Decoder()
+        self.quantize = VectorQuantizer2(1024, 256, beta=0.25,
+                                        remap=remap, sane_index_shape=sane_index_shape)
+
+
+    def forward(self, input):
+        enc = self.encoder(input)
+        z_q, q_loss, _ = self.quantize(enc)
+        dec = self.decoder(z_q)
+        return dec, q_loss
 
 
 

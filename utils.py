@@ -6,6 +6,9 @@ from scipy.linalg import sqrtm
 import torch
 import torch.nn as nn
 
+def lr_lambda(epoch):
+    return combined_scheduler(epoch, warmup_epochs=5, total_epochs=num_epochs_stage1, initial_lr=1e-4)
+
 def collate_fn_ignore_none(batch):
     # Remove None items from the batch
     batch = [item for item in batch if item is not None]
